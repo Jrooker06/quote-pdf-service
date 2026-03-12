@@ -1,0 +1,16 @@
+{
+  "name": "quote-comparison-pdf-service",
+  "version": "1.0.0",
+  "description": "External PDF parsing service for Quote Comparison. Accepts base64 PDF, returns line items JSON.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "pdf-parse": "^1.1.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
