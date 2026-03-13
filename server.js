@@ -10,9 +10,9 @@ app.use(express.json({ limit: '20mb' }));
 
 const PORT = process.env.PORT || 3000;
 
-// Simple table line regex (adjust to match your quote PDF layout)
-const TRAILING_NUMBERS = /(\d+)\s+(\d{1,3}(?:,\d{3})*\.\d{2})\s+(\d{1,3}(?:,\d{3})*\.\d{2})\s*$/;
-const PRODUCT_CODE = /\b([A-Z]{2,3}-\d{4}(?:\.[A-Z0-9]+)?)\b/;
+// Simple table line regex tuned for your quotes:
+// e.g. "SP-1036  Low Profile Speaker  9  432.00  3,888.00"
+const ROW_PATTERN = /^([A-Z0-9.\-]+)\s+(.+?)\s+(\d+)\s+(\d{1,3}(?:,\d{3})*\.\d{2})\s+(\d{1,3}(?:,\d{3})*\.\d{2})\s*$/;
 
 function parseLineItems(text) {
   const items = [];
@@ -41,18 +41,15 @@ function parseLineItems(text) {
 }
 
 function tryParseLine(line) {
-  const m = line.match(TRAILING_NUMBERS);
+  const m = line.match(ROW_PATTERN);
   if (!m) return null;
-  const left = line.slice(0, m.index).trim().replace(/\s+/g, ' ');
-  const codeMatch = left.match(PRODUCT_CODE);
-  if (!codeMatch) return null;
 
-  const productCode = codeMatch[1];
-  const description = left.slice(codeMatch.index + productCode.length).trim().replace(/\s+/g, ' ');
+  const productCode = m[1];
+  const description = m[2].trim().replace(/\s+/g, ' ');
+  const qty = parseInt(m[3], 10);
+  const price = parseFloat(m[4].replace(/,/g, ''));
+  const total = parseFloat(m[5].replace(/,/g, ''));
   const key = `${productCode.toUpperCase()}||${(description || '').toUpperCase()}`;
-  const qty = parseInt(m[1], 10);
-  const price = parseFloat(m[2].replace(/,/g, ''));
-  const total = parseFloat(m[3].replace(/,/g, ''));
 
   return { key, productCode, description, quantity: qty, unitPrice: price, lineTotal: total };
 }
