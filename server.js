@@ -27,22 +27,34 @@ function parseLineItems(text) {
     if (!inTable) continue;
     if (/Total Item Net Value/i.test(line)) break;
 
-    const m = line.match(TRAILING_NUMBERS);
-    if (!m) continue;
-    const left = line.slice(0, m.index).trim().replace(/\s+/g, ' ');
-    const codeMatch = left.match(PRODUCT_CODE);
-    if (!codeMatch) continue;
+    const one = tryParseLine(line);
+    if (one) items.push(one);
+  }
 
-    const productCode = codeMatch[1];
-    const description = left.slice(codeMatch.index + productCode.length).trim().replace(/\s+/g, ' ');
-    const key = `${productCode.toUpperCase()}||${description.toUpperCase()}`;
-    const qty = parseInt(m[1], 10);
-    const price = parseFloat(m[2].replace(/,/g, ''));
-    const total = parseFloat(m[3].replace(/,/g, ''));
-
-    items.push({ key, productCode, description, quantity: qty, unitPrice: price, lineTotal: total });
+  if (items.length === 0) {
+    for (const line of lines) {
+      const one = tryParseLine(line);
+      if (one) items.push(one);
+    }
   }
   return items;
+}
+
+function tryParseLine(line) {
+  const m = line.match(TRAILING_NUMBERS);
+  if (!m) return null;
+  const left = line.slice(0, m.index).trim().replace(/\s+/g, ' ');
+  const codeMatch = left.match(PRODUCT_CODE);
+  if (!codeMatch) return null;
+
+  const productCode = codeMatch[1];
+  const description = left.slice(codeMatch.index + productCode.length).trim().replace(/\s+/g, ' ');
+  const key = `${productCode.toUpperCase()}||${(description || '').toUpperCase()}`;
+  const qty = parseInt(m[1], 10);
+  const price = parseFloat(m[2].replace(/,/g, ''));
+  const total = parseFloat(m[3].replace(/,/g, ''));
+
+  return { key, productCode, description, quantity: qty, unitPrice: price, lineTotal: total };
 }
 
 app.post('/parse', async (req, res) => {
