@@ -102,8 +102,7 @@ function looksLikeTableEnd(line) {
     s.startsWith('county (') ||
     s.startsWith('city (') ||
     s.startsWith('subtotal') ||
-    s.startsWith('tax') ||
-    s === 'total'
+    s.startsWith('tax')
   );
 }
 
@@ -272,6 +271,27 @@ function tryParseCodePlusBody(code, body) {
   return tryParseNormalRow(`${code} ${body}`) || tryParseCollapsedRow(code, body);
 }
 
+function tryParseEmbeddedCodeRow(line) {
+  const s = normalizeLine(line);
+  if (!s || !moneyMatches(s).length) return null;
+
+  // Some PDFs glue the product code directly to the description with no space.
+  // Try all plausible leading code splits and reuse the existing body parsers.
+  for (let i = 4; i <= Math.min(20, s.length - 1); i++) {
+    const code = s.slice(0, i).trim();
+    const body = s.slice(i).trim();
+
+    if (!body) continue;
+    if (!code.includes('-')) continue;
+    if (!PRODUCT_CODE_RE.test(code)) continue;
+
+    const item = tryParseCodePlusBody(code, body);
+    if (item) return item;
+  }
+
+  return null;
+}
+
 function dedupeItems(items) {
   const seen = new Set();
   const out = [];
@@ -317,6 +337,12 @@ function parseLineItems(text) {
     }
 
     let item = tryParseNormalRow(line);
+    if (item) {
+      items.push(item);
+      continue;
+    }
+
+    item = tryParseEmbeddedCodeRow(line);
     if (item) {
       items.push(item);
       continue;
