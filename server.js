@@ -28,9 +28,47 @@ function parseNumber(value) {
   return Number.isNaN(n) ? null : n;
 }
 
-function buildItem(productCode, description, quantity, unitPrice, lineTotal) {
+function prependDescriptionPrefix(prefix, description) {
+  const cleanPrefix = normalizeLine(prefix).replace(/^[.\-]+/, '');
+  const cleanDesc = normalizeLine(description);
+
+  if (!cleanPrefix) return cleanDesc;
+  if (!cleanDesc) return cleanPrefix;
+
+  // Preserve cases like "100' 3.5 Male..." when the quote is split off.
+  if (/^['")\],.:;/]/.test(cleanDesc)) {
+    return `${cleanPrefix}${cleanDesc}`;
+  }
+
+  return `${cleanPrefix} ${cleanDesc}`;
+}
+
+function normalizeParsedCodeAndDescription(productCode, description) {
   const cleanCode = normalizeLine(productCode);
   const cleanDesc = normalizeLine(description);
+
+  if (!cleanCode || !cleanDesc) {
+    return { productCode: cleanCode, description: cleanDesc };
+  }
+
+  // Most product codes in these PDFs end with 4 digits or 4 digits plus ".P".
+  // If extra text is glued onto the end of the code token, move that suffix
+  // back to the front of the description.
+  const gluedMatch = cleanCode.match(/^([A-Z0-9.\-\/]+-\d{4}(?:\.P)?)(.+)$/i);
+  if (!gluedMatch) {
+    return { productCode: cleanCode, description: cleanDesc };
+  }
+
+  return {
+    productCode: gluedMatch[1],
+    description: prependDescriptionPrefix(gluedMatch[2], cleanDesc)
+  };
+}
+
+function buildItem(productCode, description, quantity, unitPrice, lineTotal) {
+  const normalized = normalizeParsedCodeAndDescription(productCode, description);
+  const cleanCode = normalized.productCode;
+  const cleanDesc = normalized.description;
 
   const qty = parseNumber(quantity);
   const price = parseNumber(unitPrice);
@@ -264,24 +302,7 @@ function tryParseNormalRow(line) {
   const m = s.match(/^([A-Z0-9][A-Z0-9.\-\/]*)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})\s+(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})$/i);
   if (!m) return null;
 
-  const item = buildItem(m[1], m[2], m[3], m[4], m[5]);
-  if (!item) return null;
-
-  // Some codes accidentally absorb the leading word of the description, e.g. "CK-4010Wiring".
-  // If the parsed code ends with "Wiring", try splitting it off and prepend "Wiring" back
-  // onto the description so we get:
-  //   code: "CK-4010"
-  //   description: "Wiring Bundle for Sentinel Amplifiers"
-  if (/Wiring$/i.test(item.productCode)) {
-    const fixedCode = item.productCode.replace(/Wiring$/i, '');
-    if (fixedCode && PRODUCT_CODE_RE.test(fixedCode)) {
-      const fixedDesc = `Wiring ${item.description}`;
-      const fixedItem = buildItem(fixedCode, fixedDesc, item.quantity, item.unitPrice, item.lineTotal);
-      if (fixedItem) return fixedItem;
-    }
-  }
-
-  return item;
+  return buildItem(m[1], m[2], m[3], m[4], m[5]);
 }
 
 function tryParseCodePlusBody(code, body) {
@@ -292,23 +313,16 @@ function tryParseEmbeddedCodeRow(line) {
   const s = normalizeLine(line);
   if (!s || !moneyMatches(s).length) return null;
 
-  // Special case: some items start their description with a gauge like "18/2" and the PDF
-  // glues it directly onto a 4-digit code suffix (e.g. "AC-000418/2 ..."). In those cases,
-  // we want the product code to be "AC-0004" and keep "18/2" in the description.
-  //
-  // This heuristic is intentionally narrow: it only triggers when the would-be description
-  // starts with N/N (common wire gauge notation) immediately after a 4-digit suffix.
-  const gaugeGlued = s.match(/^([A-Z0-9.\-\/]+-\d{4})(\d{1,3}\/\d{1,3}\b.+)$/i);
-  if (gaugeGlued) {
-    const item = tryParseCodePlusBody(gaugeGlued[1], gaugeGlued[2]);
+  // Prefer the common code shape first: PREFIX-1234 or PREFIX-1234.P
+  const canonicalSplit = s.match(/^([A-Z0-9.\-\/]+-\d{4}(?:\.P)?)(.+)$/i);
+  if (canonicalSplit) {
+    const item = tryParseCodePlusBody(canonicalSplit[1], canonicalSplit[2]);
     if (item) return item;
   }
 
   // Some PDFs glue the product code directly to the description with no space.
   // Try all plausible leading code splits and reuse the existing body parsers.
-  // Prefer the longest code that yields a valid row (avoids pushing trailing code digits
-  // into the description, e.g. "AC-0 00418/2..." instead of "AC-0004 18/2...").
-  for (let i = Math.min(20, s.length - 1); i >= 4; i--) {
+  for (let i = 4; i <= Math.min(20, s.length - 1); i++) {
     const code = s.slice(0, i).trim();
     const body = s.slice(i).trim();
 
