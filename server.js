@@ -264,7 +264,24 @@ function tryParseNormalRow(line) {
   const m = s.match(/^([A-Z0-9][A-Z0-9.\-\/]*)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})\s+(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})$/i);
   if (!m) return null;
 
-  return buildItem(m[1], m[2], m[3], m[4], m[5]);
+  const item = buildItem(m[1], m[2], m[3], m[4], m[5]);
+  if (!item) return null;
+
+  // Some codes accidentally absorb the leading word of the description, e.g. "CK-4010Wiring".
+  // If the parsed code ends with "Wiring", try splitting it off and prepend "Wiring" back
+  // onto the description so we get:
+  //   code: "CK-4010"
+  //   description: "Wiring Bundle for Sentinel Amplifiers"
+  if (/Wiring$/i.test(item.productCode)) {
+    const fixedCode = item.productCode.replace(/Wiring$/i, '');
+    if (fixedCode && PRODUCT_CODE_RE.test(fixedCode)) {
+      const fixedDesc = `Wiring ${item.description}`;
+      const fixedItem = buildItem(fixedCode, fixedDesc, item.quantity, item.unitPrice, item.lineTotal);
+      if (fixedItem) return fixedItem;
+    }
+  }
+
+  return item;
 }
 
 function tryParseCodePlusBody(code, body) {
@@ -274,6 +291,18 @@ function tryParseCodePlusBody(code, body) {
 function tryParseEmbeddedCodeRow(line) {
   const s = normalizeLine(line);
   if (!s || !moneyMatches(s).length) return null;
+
+  // Special case: some items start their description with a gauge like "18/2" and the PDF
+  // glues it directly onto a 4-digit code suffix (e.g. "AC-000418/2 ..."). In those cases,
+  // we want the product code to be "AC-0004" and keep "18/2" in the description.
+  //
+  // This heuristic is intentionally narrow: it only triggers when the would-be description
+  // starts with N/N (common wire gauge notation) immediately after a 4-digit suffix.
+  const gaugeGlued = s.match(/^([A-Z0-9.\-\/]+-\d{4})(\d{1,3}\/\d{1,3}\b.+)$/i);
+  if (gaugeGlued) {
+    const item = tryParseCodePlusBody(gaugeGlued[1], gaugeGlued[2]);
+    if (item) return item;
+  }
 
   // Some PDFs glue the product code directly to the description with no space.
   // Try all plausible leading code splits and reuse the existing body parsers.
