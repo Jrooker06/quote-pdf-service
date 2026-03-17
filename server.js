@@ -277,7 +277,9 @@ function tryParseEmbeddedCodeRow(line) {
 
   // Some PDFs glue the product code directly to the description with no space.
   // Try all plausible leading code splits and reuse the existing body parsers.
-  for (let i = 4; i <= Math.min(20, s.length - 1); i++) {
+  // Prefer the longest code that yields a valid row (avoids pushing trailing code digits
+  // into the description, e.g. "AC-0 00418/2..." instead of "AC-0004 18/2...").
+  for (let i = Math.min(20, s.length - 1); i >= 4; i--) {
     const code = s.slice(0, i).trim();
     const body = s.slice(i).trim();
 
