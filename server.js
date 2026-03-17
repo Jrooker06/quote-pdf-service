@@ -1,5 +1,5 @@
 /*
-key change is tryParseCollapsedRow(), which parses from the numeric tail instead of relying on spaces.
+Replaced extractTailNumbers, splitDescriptionAndQty, and tryParseCollapsedRow with the math-validated versions you provided:
 */
 
 const express = require('express');
@@ -50,8 +50,13 @@ function buildItem(productCode, description, quantity, unitPrice, lineTotal) {
 }
 
 function isLikelyHeaderOrFooter(line) {
-  const s = normalizeLine(line).toLowerCase();
+  const normalized = normalizeLine(line);
+  const s = normalized.toLowerCase();
   if (!s) return true;
+
+  // Avoid over-filtering: short/odd-looking strings can still be valid rows.
+  // If it looks like a product code fragment or contains money, keep it.
+  if (PRODUCT_CODE_RE.test(normalized) || moneyMatches(normalized).length) return false;
 
   return (
     s === 'quote' ||
@@ -132,40 +137,68 @@ function mergeCodeFragments(lines) {
   return merged;
 }
 
+function moneyMatches(text) {
+  return [...text.matchAll(/\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2}/g)];
+}
+
+function nearlyEqual(a, b, tolerance = 0.06) {
+  return Math.abs(a - b) <= tolerance;
+}
+
 function extractTailNumbers(text) {
-  const matches = [...text.matchAll(/\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2}/g)];
+  const matches = moneyMatches(text);
   if (matches.length < 2) return null;
 
   const totalMatch = matches[matches.length - 1];
   const priceMatch = matches[matches.length - 2];
 
-  const total = totalMatch[0];
   const unitPrice = priceMatch[0];
+  const lineTotal = totalMatch[0];
 
-  const beforePrice = text.slice(0, priceMatch.index);
-  const betweenPriceAndTotal = text.slice(priceMatch.index + unitPrice.length, totalMatch.index);
+  const beforePrice = text.slice(0, priceMatch.index).trim();
 
   return {
     beforePrice,
-    betweenPriceAndTotal,
     unitPrice,
-    lineTotal: total
+    lineTotal
   };
 }
 
-function splitDescriptionAndQty(prefix) {
+function splitDescriptionAndQtyByMath(prefix, unitPrice, lineTotal) {
   const s = normalizeLine(prefix);
   if (!s) return null;
 
-  const m = s.match(/^(.*?)(\d+(?:\.\d+)?)$/);
-  if (!m) return null;
+  const price = parseNumber(unitPrice);
+  const total = parseNumber(lineTotal);
 
-  const description = normalizeLine(m[1]);
-  const quantity = m[2];
+  if (price == null || total == null || price === 0) return null;
 
-  if (!description || !quantity) return null;
+  // Try 1, 2, 3, 4, 5 digit qty at the end of the string
+  // This handles things like:
+  // Cat61463.55  => desc ends with "Cat6", qty = 1
+  // Speaker9432.00 => desc ends with "Speaker", qty = 9
+  // White100000.71 => desc ends with "White", qty = 10000
+  for (let len = 1; len <= 5; len++) {
+    if (s.length <= len) continue;
 
-  return { description, quantity };
+    const qtyStr = s.slice(-len);
+    const desc = s.slice(0, -len).trim();
+
+    if (!/^\d+$/.test(qtyStr)) continue;
+    if (!desc) continue;
+
+    const qty = parseInt(qtyStr, 10);
+    if (!qty) continue;
+
+    if (nearlyEqual(qty * price, total)) {
+      return {
+        description: desc,
+        quantity: qty
+      };
+    }
+  }
+
+  return null;
 }
 
 function tryParseCollapsedRow(productCode, body) {
@@ -175,13 +208,18 @@ function tryParseCollapsedRow(productCode, body) {
   const tail = extractTailNumbers(text);
   if (!tail) return null;
 
-  const qtySplit = splitDescriptionAndQty(tail.beforePrice);
-  if (!qtySplit) return null;
+  const split = splitDescriptionAndQtyByMath(
+    tail.beforePrice,
+    tail.unitPrice,
+    tail.lineTotal
+  );
+
+  if (!split) return null;
 
   return buildItem(
     productCode,
-    qtySplit.description,
-    qtySplit.quantity,
+    split.description,
+    split.quantity,
     tail.unitPrice,
     tail.lineTotal
   );
