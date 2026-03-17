@@ -1,8 +1,7 @@
-/**
- * PDF parsing endpoint for Quote Comparison.
- * POST /parse with body { "pdfBase64": "..." }
- * -> { "items": [ { "key", "productCode", "description", "quantity", "unitPrice", "lineTotal" } ] }
- */
+/*
+key change is tryParseCollapsedRow(), which parses from the numeric tail instead of relying on spaces.
+*/
+
 const express = require('express');
 const pdfParse = require('pdf-parse');
 
@@ -11,35 +10,34 @@ app.use(express.json({ limit: '20mb' }));
 
 const PORT = process.env.PORT || 3000;
 
-const MONEY_RE = '\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})|\\d+(?:\\.\\d{2})';
-const QTY_RE = '\\d+(?:\\.\\d+)?';
-const CODE_RE = '[A-Z0-9][A-Z0-9.\\-/]*';
+const MONEY_RE = /\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2}/g;
+const PRODUCT_CODE_RE = /^[A-Z0-9][A-Z0-9.\-\/]*$/i;
 
 function normalizeLine(line) {
   return (line || '')
-    .replace(/\u000c/g, ' ') // form feed/page break
-    .replace(/\u00A0/g, ' ') // nbsp
+    .replace(/\u000c/g, ' ')
+    .replace(/\u00A0/g, ' ')
     .replace(/\t/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-function parseNumber(v) {
-  if (v == null) return null;
-  const n = parseFloat(String(v).replace(/[$,]/g, '').trim());
+function parseNumber(value) {
+  if (value == null) return null;
+  const n = parseFloat(String(value).replace(/,/g, '').trim());
   return Number.isNaN(n) ? null : n;
 }
 
 function buildItem(productCode, description, quantity, unitPrice, lineTotal) {
-  const cleanCode = (productCode || '').trim();
-  const cleanDesc = (description || '').replace(/\s+/g, ' ').trim();
+  const cleanCode = normalizeLine(productCode);
+  const cleanDesc = normalizeLine(description);
+
   const qty = parseNumber(quantity);
   const price = parseNumber(unitPrice);
   const total = parseNumber(lineTotal);
 
-  if (!cleanCode || !cleanDesc || qty == null || price == null || total == null) {
-    return null;
-  }
+  if (!cleanCode || !cleanDesc) return null;
+  if (qty == null || price == null || total == null) return null;
 
   return {
     key: `${cleanCode.toUpperCase()}||${cleanDesc.toUpperCase()}`,
@@ -56,31 +54,37 @@ function isLikelyHeaderOrFooter(line) {
   if (!s) return true;
 
   return (
-    s.startsWith('test copy') ||
-    s.startsWith('order confirmation') ||
+    s === 'quote' ||
+    s === 'test copy' ||
     s === 'order' ||
+    s === 'total' ||
+    s === 'product' ||
+    s === 'descriptionquantityprice' ||
     s.startsWith('page:') ||
-    s.includes('page: 2 / 2') ||
+    s === '1/3' ||
+    s === '2 / 3' ||
+    s === '3 / 3' ||
     s.startsWith('bill to') ||
     s.startsWith('ship to') ||
     s.startsWith('date:') ||
-    s.startsWith('po number:') ||
-    s.startsWith('requested date:') ||
+    s.startsWith('expires:') ||
+    s.startsWith('customer number:') ||
     s.startsWith('sales rep:') ||
     s.startsWith('9858 south audio drive') ||
     s.startsWith('west jordan, ut') ||
     s.startsWith('toll free:') ||
-    s.startsWith('fax:')
+    s.startsWith('fax:') ||
+    s === 'menu'
   );
 }
 
 function looksLikeTableStart(line) {
   const s = normalizeLine(line).toLowerCase();
-  return s.includes('product') &&
-    s.includes('description') &&
-    s.includes('quantity') &&
-    s.includes('price') &&
-    s.includes('total');
+  return (
+    s === 'product' ||
+    s.includes('descriptionquantityprice') ||
+    (s.includes('product') && s.includes('description'))
+  );
 }
 
 function looksLikeTableEnd(line) {
@@ -89,47 +93,112 @@ function looksLikeTableEnd(line) {
     s.startsWith('total item net value') ||
     s.startsWith('overall discount') ||
     s.startsWith('freight') ||
-    s.startsWith('state (%)') ||
-    s.startsWith('county (%)') ||
-    s.startsWith('city (%)') ||
-    s === 'total' ||
-    s.startsWith('total ')
+    s.startsWith('state (') ||
+    s.startsWith('county (') ||
+    s.startsWith('city (') ||
+    s.startsWith('subtotal') ||
+    s.startsWith('tax') ||
+    s === 'total'
   );
 }
 
-function isProductCodeOnly(line) {
+function isCodeFragment(line) {
   const s = normalizeLine(line);
-  return new RegExp(`^${CODE_RE}$`, 'i').test(s);
+  if (!s) return false;
+  return PRODUCT_CODE_RE.test(s) && !/\d+\.\d{2}/.test(s);
 }
 
-function tryParseSingleLine(line) {
+function mergeCodeFragments(lines) {
+  const merged = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const curr = lines[i];
+    const next = lines[i + 1];
+
+    if (
+      curr &&
+      next &&
+      /^[A-Z0-9.\-\/]+-$/i.test(curr) &&
+      /^[A-Z0-9.\-\/]+$/i.test(next)
+    ) {
+      merged.push(curr + next);
+      i += 1;
+      continue;
+    }
+
+    merged.push(curr);
+  }
+
+  return merged;
+}
+
+function extractTailNumbers(text) {
+  const matches = [...text.matchAll(/\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2}/g)];
+  if (matches.length < 2) return null;
+
+  const totalMatch = matches[matches.length - 1];
+  const priceMatch = matches[matches.length - 2];
+
+  const total = totalMatch[0];
+  const unitPrice = priceMatch[0];
+
+  const beforePrice = text.slice(0, priceMatch.index);
+  const betweenPriceAndTotal = text.slice(priceMatch.index + unitPrice.length, totalMatch.index);
+
+  return {
+    beforePrice,
+    betweenPriceAndTotal,
+    unitPrice,
+    lineTotal: total
+  };
+}
+
+function splitDescriptionAndQty(prefix) {
+  const s = normalizeLine(prefix);
+  if (!s) return null;
+
+  const m = s.match(/^(.*?)(\d+(?:\.\d+)?)$/);
+  if (!m) return null;
+
+  const description = normalizeLine(m[1]);
+  const quantity = m[2];
+
+  if (!description || !quantity) return null;
+
+  return { description, quantity };
+}
+
+function tryParseCollapsedRow(productCode, body) {
+  const text = normalizeLine(body);
+  if (!productCode || !text) return null;
+
+  const tail = extractTailNumbers(text);
+  if (!tail) return null;
+
+  const qtySplit = splitDescriptionAndQty(tail.beforePrice);
+  if (!qtySplit) return null;
+
+  return buildItem(
+    productCode,
+    qtySplit.description,
+    qtySplit.quantity,
+    tail.unitPrice,
+    tail.lineTotal
+  );
+}
+
+function tryParseNormalRow(line) {
   const s = normalizeLine(line);
   if (!s) return null;
 
-  const pattern = new RegExp(
-    `^(${CODE_RE})\\s+(.+?)\\s+(${QTY_RE})\\s+(${MONEY_RE})\\s+(${MONEY_RE})$`,
-    'i'
-  );
-
-  const m = s.match(pattern);
+  const m = s.match(/^([A-Z0-9][A-Z0-9.\-\/]*)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})\s+(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})$/i);
   if (!m) return null;
 
   return buildItem(m[1], m[2], m[3], m[4], m[5]);
 }
 
-function tryParseProductPlusBody(productCode, body) {
-  const s = normalizeLine(body);
-  if (!productCode || !s) return null;
-
-  const pattern = new RegExp(
-    `^(.+?)\\s+(${QTY_RE})\\s+(${MONEY_RE})\\s+(${MONEY_RE})$`,
-    'i'
-  );
-
-  const m = s.match(pattern);
-  if (!m) return null;
-
-  return buildItem(productCode, m[1], m[2], m[3], m[4]);
+function tryParseCodePlusBody(code, body) {
+  return tryParseNormalRow(`${code} ${body}`) || tryParseCollapsedRow(code, body);
 }
 
 function dedupeItems(items) {
@@ -137,14 +206,7 @@ function dedupeItems(items) {
   const out = [];
 
   for (const item of items) {
-    const sig = [
-      item.productCode,
-      item.description,
-      item.quantity,
-      item.unitPrice,
-      item.lineTotal
-    ].join('|');
-
+    const sig = `${item.productCode}|${item.description}|${item.quantity}|${item.unitPrice}|${item.lineTotal}`;
     if (seen.has(sig)) continue;
     seen.add(sig);
     out.push(item);
@@ -155,13 +217,12 @@ function dedupeItems(items) {
 
 function parseLineItems(text) {
   const rawLines = (text || '').split(/\r?\n/);
-  const lines = rawLines
-    .map(normalizeLine)
-    .filter(Boolean);
+  let lines = rawLines.map(normalizeLine).filter(Boolean);
+  lines = mergeCodeFragments(lines);
 
   console.log('raw line count:', rawLines.length);
   console.log('normalized non-empty line count:', lines.length);
-  console.log('first 80 normalized lines:', JSON.stringify(lines.slice(0, 80), null, 2));
+  console.log('first 100 normalized lines:', JSON.stringify(lines.slice(0, 100), null, 2));
 
   const items = [];
   let inTable = false;
@@ -171,14 +232,12 @@ function parseLineItems(text) {
 
     if (looksLikeTableStart(line)) {
       inTable = true;
-      console.log('table start:', line);
       continue;
     }
 
     if (!inTable) continue;
 
     if (looksLikeTableEnd(line)) {
-      console.log('table end:', line);
       break;
     }
 
@@ -186,25 +245,24 @@ function parseLineItems(text) {
       continue;
     }
 
-    // Case 1: full row is already on one line
-    let item = tryParseSingleLine(line);
+    let item = tryParseNormalRow(line);
     if (item) {
       items.push(item);
       continue;
     }
 
-    // Case 2: product code on one line, body on next line
-    if (isProductCodeOnly(line) && i + 1 < lines.length) {
-      item = tryParseProductPlusBody(line, lines[i + 1]);
-      if (item) {
-        items.push(item);
-        i += 1;
-        continue;
+    if (isCodeFragment(line)) {
+      if (i + 1 < lines.length) {
+        item = tryParseCodePlusBody(line, lines[i + 1]);
+        if (item) {
+          items.push(item);
+          i += 1;
+          continue;
+        }
       }
 
-      // Case 3: product code + 2 body lines + pricing line
       if (i + 2 < lines.length) {
-        item = tryParseProductPlusBody(line, `${lines[i + 1]} ${lines[i + 2]}`);
+        item = tryParseCodePlusBody(line, `${lines[i + 1]} ${lines[i + 2]}`);
         if (item) {
           items.push(item);
           i += 2;
@@ -212,9 +270,8 @@ function parseLineItems(text) {
         }
       }
 
-      // Case 4: product code + 3 body lines
       if (i + 3 < lines.length) {
-        item = tryParseProductPlusBody(line, `${lines[i + 1]} ${lines[i + 2]} ${lines[i + 3]}`);
+        item = tryParseCodePlusBody(line, `${lines[i + 1]} ${lines[i + 2]} ${lines[i + 3]}`);
         if (item) {
           items.push(item);
           i += 3;
@@ -223,21 +280,11 @@ function parseLineItems(text) {
       }
     }
 
-    // Case 5: malformed row split across 2 or 3 lines even without code-only first line
     if (i + 1 < lines.length) {
-      item = tryParseSingleLine(`${line} ${lines[i + 1]}`);
+      item = tryParseNormalRow(`${line} ${lines[i + 1]}`);
       if (item) {
         items.push(item);
         i += 1;
-        continue;
-      }
-    }
-
-    if (i + 2 < lines.length) {
-      item = tryParseSingleLine(`${line} ${lines[i + 1]} ${lines[i + 2]}`);
-      if (item) {
-        items.push(item);
-        i += 2;
         continue;
       }
     }
@@ -246,7 +293,7 @@ function parseLineItems(text) {
   const deduped = dedupeItems(items);
 
   console.log('parsed item count:', deduped.length);
-  console.log('first 10 parsed items:', JSON.stringify(deduped.slice(0, 10), null, 2));
+  console.log('first 15 parsed items:', JSON.stringify(deduped.slice(0, 15), null, 2));
 
   return deduped;
 }
@@ -294,9 +341,7 @@ app.post('/parse', async (req, res) => {
   }
 });
 
-app.get('/health', (req, res) => {
-  res.send('OK');
-});
+app.get('/health', (req, res) => res.send('OK'));
 
 app.listen(PORT, () => {
   console.log('PDF parse service on port', PORT);
