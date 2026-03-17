@@ -1,5 +1,5 @@
 /*
-Replaced extractTailNumbers, splitDescriptionAndQty, and tryParseCollapsedRow with the math-validated versions you provided:
+qty digit(s) are glued onto the front of the unit price. With the plain “last two money values” approach, the parser was seeing 61463.55 / 9432.00 as the unit price, so the (qty \times unitPrice \approx total) validation could never succeed.
 */
 
 const express = require('express');
@@ -201,6 +201,36 @@ function splitDescriptionAndQtyByMath(prefix, unitPrice, lineTotal) {
   return null;
 }
 
+function expandUnitPriceCandidates(beforePrice, unitPrice) {
+  const basePrefix = normalizeLine(beforePrice);
+  const raw = String(unitPrice || '').trim();
+  if (!basePrefix || !raw) return [{ beforePrice: basePrefix, unitPrice: raw }];
+
+  const out = [{ beforePrice: basePrefix, unitPrice: raw }];
+  const cleaned = raw.replace(/,/g, '');
+
+  // Some PDFs glue qty digits onto the front of the unit price with no delimiter:
+  // Speaker9432.00 => qty "9", unit "432.00"
+  // Cat61463.55 => suffix "...Cat6" + qty "1", unit "463.55"
+  // White100000.71 => qty "10000", unit "0.71"
+  for (let shift = 1; shift <= 5; shift++) {
+    if (cleaned.length <= shift) continue;
+
+    const moved = cleaned.slice(0, shift);
+    const rest = cleaned.slice(shift);
+
+    if (!/^\d+$/.test(moved)) continue;
+    if (!/^\d+\.\d{2}$/.test(rest)) continue;
+
+    out.push({
+      beforePrice: normalizeLine(`${basePrefix}${moved}`),
+      unitPrice: rest
+    });
+  }
+
+  return out;
+}
+
 function tryParseCollapsedRow(productCode, body) {
   const text = normalizeLine(body);
   if (!productCode || !text) return null;
@@ -208,21 +238,24 @@ function tryParseCollapsedRow(productCode, body) {
   const tail = extractTailNumbers(text);
   if (!tail) return null;
 
-  const split = splitDescriptionAndQtyByMath(
-    tail.beforePrice,
-    tail.unitPrice,
-    tail.lineTotal
-  );
+  const candidates = expandUnitPriceCandidates(tail.beforePrice, tail.unitPrice);
 
-  if (!split) return null;
+  for (const c of candidates) {
+    const split = splitDescriptionAndQtyByMath(c.beforePrice, c.unitPrice, tail.lineTotal);
+    if (!split) continue;
 
-  return buildItem(
-    productCode,
-    split.description,
-    split.quantity,
-    tail.unitPrice,
-    tail.lineTotal
-  );
+    const item = buildItem(
+      productCode,
+      split.description,
+      split.quantity,
+      c.unitPrice,
+      tail.lineTotal
+    );
+
+    if (item) return item;
+  }
+
+  return null;
 }
 
 function tryParseNormalRow(line) {
