@@ -52,9 +52,16 @@ function normalizeParsedCodeAndDescription(productCode, description) {
   }
 
   // Most product codes in these PDFs end with 4 digits or 4 digits plus ".P".
-  // If extra text is glued onto the end of the code token, move that suffix
-  // back to the front of the description.
-  const gluedMatch = cleanCode.match(/^([A-Z0-9.\-\/]+-\d{4}(?:\.P)?)(.+)$/i);
+  // If extra text is glued onto the end of the code token, move only the
+  // extra suffix back to the front of the description.
+  //
+  // Important: prefer preserving a real ".P" suffix as part of the code.
+  // Without this, "ST-PA-8010.P" can be misread as code "ST-PA-8010" with
+  // description prefix "P", which breaks part-change alert matching.
+  let gluedMatch = cleanCode.match(/^([A-Z0-9.\-\/]+-\d{4}\.P)(.+)$/i);
+  if (!gluedMatch) {
+    gluedMatch = cleanCode.match(/^([A-Z0-9.\-\/]+-\d{4})(.+)$/i);
+  }
   if (!gluedMatch) {
     return { productCode: cleanCode, description: cleanDesc };
   }
