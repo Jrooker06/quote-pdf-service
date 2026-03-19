@@ -440,6 +440,105 @@ function parseLineItems(text) {
   return deduped;
 }
 
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function monthNameToNumber(m) {
+  const s = String(m || '').toLowerCase().trim();
+  const map = {
+    jan: 1, january: 1,
+    feb: 2, february: 2,
+    mar: 3, march: 3,
+    apr: 4, april: 4,
+    may: 5,
+    jun: 6, june: 6,
+    jul: 7, july: 7,
+    aug: 8, august: 8,
+    sep: 9, sept: 9, september: 9,
+    oct: 10, october: 10,
+    nov: 11, november: 11,
+    dec: 12, december: 12
+  };
+  return map[s] || null;
+}
+
+function toISODate(y, m, d) {
+  const yy = Number(y);
+  const mm = Number(m);
+  const dd = Number(d);
+  if (!yy || !mm || !dd) return null;
+  return `${yy}-${pad2(mm)}-${pad2(dd)}`;
+}
+
+function parseDateCandidate(raw) {
+  if (!raw) return null;
+  const s = String(raw).replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+
+  // YYYY-MM-DD or YYYY/MM/DD
+  let m = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
+  if (m) return toISODate(m[1], m[2], m[3]);
+
+  // M/D/YYYY or D-M-YYYY (detect which side is day by > 12)
+  m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (m) {
+    let a = Number(m[1]);
+    let b = Number(m[2]);
+    let y = Number(m[3]);
+    if (y < 100) y = 2000 + y; // fallback
+
+    // If first value cannot be a month, treat first as day.
+    if (a > 12 && b <= 12) {
+      return toISODate(y, b, a);
+    }
+    return toISODate(y, a, b);
+  }
+
+  // D-MMM-YYYY or D MMM YYYY
+  m = s.match(/^(\d{1,2})[\s\-\/]*([A-Za-z]{3,9})[\s\-\/]*(\d{2,4})$/);
+  if (m) {
+    const d = Number(m[1]);
+    const month = monthNameToNumber(m[2]);
+    let y = Number(m[3]);
+    if (y < 100) y = 2000 + y;
+    if (!month) return null;
+    return toISODate(y, month, d);
+  }
+
+  return null;
+}
+
+function extractQuoteDate(text) {
+  const lines = String(text || '').split(/\r?\n/).map(normalizeLine);
+  if (!lines.length) return null;
+
+  // Prefer explicit "Date:" / "Quote Date:"-style lines.
+  for (const line of lines) {
+    const s = (line || '').toLowerCase();
+    if (s.startsWith('date:')) {
+      const candidate = line.slice(line.indexOf(':') + 1).trim();
+      const iso = parseDateCandidate(candidate);
+      if (iso) return iso;
+    }
+
+    const eq = s.match(/^quote\s*date\s*[:\-]\s*(.+)$/i);
+    if (eq) {
+      const iso = parseDateCandidate(eq[1]);
+      if (iso) return iso;
+    }
+  }
+
+  // Fallback to searching for a "date:" substring anywhere in the text.
+  const rawMatch = String(text || '').match(/(?:\bdate\b|\bquote\s*date\b)\s*[:\-]\s*([0-9]{1,4}[\/\-\s][0-9A-Za-z]{2,})/i);
+  if (rawMatch && rawMatch[1]) {
+    const iso = parseDateCandidate(rawMatch[1]);
+    if (iso) return iso;
+  }
+
+  return null;
+}
+
 app.post('/parse', async (req, res) => {
   try {
     const { pdfBase64 } = req.body || {};
@@ -456,6 +555,8 @@ app.post('/parse', async (req, res) => {
     console.log('extracted text length:', (data.text || '').length);
 
     const items = parseLineItems(data.text);
+    const quoteDate = extractQuoteDate(data.text);
+    console.log('parsed quoteDate:', quoteDate);
 
     if (!items.length) {
       console.warn('No items parsed from PDF');
@@ -463,14 +564,14 @@ app.post('/parse', async (req, res) => {
         error: 'No line items parsed from PDF',
         items: [],
         quoteNumber: null,
-        quoteDate: null
+        quoteDate
       });
     }
 
     return res.json({
       items,
       quoteNumber: null,
-      quoteDate: null
+      quoteDate
     });
   } catch (err) {
     console.error('parse error:', err);
