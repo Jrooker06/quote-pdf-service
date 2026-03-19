@@ -506,6 +506,28 @@ function parseDateCandidate(raw) {
     return toISODate(y, month, d);
   }
 
+  // MMM DD, YYYY or MMM DD YYYY
+  m = s.match(/^([A-Za-z]{3,9})\s+(\d{1,2})\,?\s*(\d{2,4})$/);
+  if (m) {
+    const month = monthNameToNumber(m[1]);
+    const d = Number(m[2]);
+    let y = Number(m[3]);
+    if (y < 100) y = 2000 + y;
+    if (!month) return null;
+    return toISODate(y, month, d);
+  }
+
+  // DD MMM YYYY (with optional comma)
+  m = s.match(/^(\d{1,2})\s+([A-Za-z]{3,9})\,?\s*(\d{2,4})$/);
+  if (m) {
+    const d = Number(m[1]);
+    const month = monthNameToNumber(m[2]);
+    let y = Number(m[3]);
+    if (y < 100) y = 2000 + y;
+    if (!month) return null;
+    return toISODate(y, month, d);
+  }
+
   return null;
 }
 
